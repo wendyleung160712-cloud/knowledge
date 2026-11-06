@@ -6,6 +6,8 @@
 
 https://wendyleung160712-cloud.github.io/knowledge/
 
+站点由 `gh-pages` 分支发布（源码在 `main`）。
+
 ## 本地运行
 
 ```bash
@@ -21,4 +23,4 @@ npm run dev
 npm run build
 ```
 
-产物在 `dist/`。仓库已配置 GitHub Actions：推送到 `main` 后自动部署到 GitHub Pages（`base` 为 `/knowledge/`）。
+产物在 `dist/`。Vite `base` 为 `/knowledge/`。
