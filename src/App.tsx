@@ -6,6 +6,7 @@ import {
   ClipboardList,
   Eye,
   Mic,
+  PenLine,
   RotateCcw,
   Star,
   Trophy,
@@ -22,6 +23,7 @@ import type {
 } from './types';
 import {
   BATCH_SIZE,
+  DAILY_SIZE,
   LEARN_LABEL,
   LEARN_STEPS,
   TEST_GATES,
@@ -49,9 +51,9 @@ import {
   stopSpeak,
 } from './utils/speech';
 
-type View = 'home' | 'learn' | 'batchDone' | 'test' | 'wrong' | 'list';
+type View = 'home' | 'learn' | 'batchDone' | 'test' | 'wrong' | 'list' | 'daily';
 
-const POS_OPTIONS = ['n.', 'v.', 'adj.', 'adv.', 'prep.', 'num.', 'phr.'] as const;
+const POS_OPTIONS = ['n.', 'v.', 'adj.', 'adv.', 'prep.', 'pron.', 'conj.', 'interj.', 'art.', 'num.', 'phr.'] as const;
 
 function shuffle<T>(arr: T[]): T[] {
   const a = [...arr];
@@ -90,6 +92,44 @@ function PosBadge({ pos }: { pos: string }) {
   );
 }
 
+function IpaLine({ ipa, size = 'md' }: { ipa?: string; size?: 'sm' | 'md' | 'lg' }) {
+  if (!ipa) return null;
+  const cls =
+    size === 'lg'
+      ? 'mt-3 text-xl font-semibold tracking-wide text-indigo-600 sm:text-2xl'
+      : size === 'md'
+        ? 'mt-2 text-lg font-semibold tracking-wide text-indigo-600'
+        : 'mt-1 text-sm font-medium text-indigo-500';
+  return <p className={cls}>{ipa}</p>;
+}
+
+function SpeakButton({
+  word,
+  times = 1,
+  label,
+  strong = false,
+}: {
+  word: string;
+  times?: number;
+  label: string;
+  strong?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => speakEnglish(word, times)}
+      className={`flex w-full items-center justify-center gap-2 rounded-2xl py-3.5 font-extrabold ${
+        strong
+          ? 'bg-indigo-600 text-white shadow-md shadow-indigo-200'
+          : 'bg-indigo-50 text-indigo-900 ring-1 ring-indigo-200'
+      }`}
+    >
+      <Volume2 className="h-5 w-5" /> {label}
+    </button>
+  );
+}
+
+
 export default function App() {
   const [progress, setProgress] = useState<ProgressState>(() => loadProgress());
   const [view, setView] = useState<View>('home');
@@ -115,6 +155,13 @@ export default function App() {
   const [meaningMode, setMeaningMode] = useState<'en2zh' | 'zh2en'>('en2zh');
   const [choices, setChoices] = useState<string[]>([]);
   const [pendingTestBatch, setPendingTestBatch] = useState<VocabItem[]>([]);
+  const [spellShowIpa, setSpellShowIpa] = useState(false);
+  const [dailyQueue, setDailyQueue] = useState<VocabItem[]>([]);
+  const [dailyIndex, setDailyIndex] = useState(0);
+  const [dailyStep, setDailyStep] = useState<'dictation' | 'check' | 'shadow'>('dictation');
+  const [dailyInput, setDailyInput] = useState('');
+  const [dailyFeedback, setDailyFeedback] = useState<'idle' | 'ok' | 'bad'>('idle');
+  const [dailyShowIpa, setDailyShowIpa] = useState(false);
 
   const recRef = useRef<ReturnType<typeof createRecognizer>>(null);
   const meetPlayed = useRef(false);
@@ -218,8 +265,85 @@ export default function App() {
     setTestGate('pos');
     setFeedback('idle');
     setSpellInput('');
+    setSpellShowIpa(false);
     setChoices(pickPosChoices(list[0].pos));
     setView('test');
+  }
+
+  function pickDailyPool(): VocabItem[] {
+    const byId = new Map(VOCAB.map((w) => [w.id, w]));
+    const picked: VocabItem[] = [];
+    const seen = new Set<string>();
+    const push = (w: VocabItem | undefined) => {
+      if (!w || seen.has(w.id)) return;
+      seen.add(w.id);
+      picked.push(w);
+    };
+    // 1) 错词本优先
+    for (const id of progress.wrongIds) push(byId.get(id));
+    // 2) 已学未掌握
+    for (const w of VOCAB) {
+      const p = progress.words[w.id];
+      if (isLearned(p) && !isMastered(p)) push(w);
+    }
+    // 3) 已学要复习（有 learnedAt 的）
+    const learned = VOCAB.filter((w) => isLearned(progress.words[w.id])).sort((a, b) => {
+      const ta = progress.words[a.id]?.learnedAt || 0;
+      const tb = progress.words[b.id]?.learnedAt || 0;
+      return ta - tb;
+    });
+    for (const w of learned) push(w);
+    // 4) 不够则从未学里补
+    if (picked.length < DAILY_SIZE) {
+      for (const w of shuffle(VOCAB)) push(w);
+    }
+    return shuffle(picked).slice(0, Math.min(DAILY_SIZE, Math.max(1, picked.length || VOCAB.length)));
+  }
+
+  function startDaily() {
+    stopSpeak();
+    const list = pickDailyPool();
+    if (!list.length) {
+      alert('词表为空');
+      return;
+    }
+    setDailyQueue(list);
+    setDailyIndex(0);
+    setDailyStep('dictation');
+    setDailyInput('');
+    setDailyFeedback('idle');
+    setDailyShowIpa(false);
+    setHeard('');
+    setView('daily');
+  }
+
+  function advanceDaily(ok: boolean) {
+    const w = dailyQueue[dailyIndex];
+    if (!w) return;
+    // 每日练计分进错词本：拼写关
+    const nextState = markTestGate(progress, w.id, 'spell', ok);
+    // 若尚未学过，先标为已学（方便后续检测）
+    const withLearn = isLearned(nextState.words[w.id]) ? nextState : markLearned(nextState, w.id);
+    update(withLearn);
+    setDailyFeedback(ok ? 'ok' : 'bad');
+    window.setTimeout(() => {
+      setDailyStep('shadow');
+      setDailyFeedback('idle');
+      speakEnglish(w.word, 1);
+    }, ok ? 450 : 900);
+  }
+
+  function nextDailyWord() {
+    if (dailyIndex + 1 < dailyQueue.length) {
+      setDailyIndex(dailyIndex + 1);
+      setDailyStep('dictation');
+      setDailyInput('');
+      setDailyFeedback('idle');
+      setDailyShowIpa(false);
+      setHeard('');
+    } else {
+      setView('home');
+    }
   }
 
   // auto TTS on meet
@@ -331,6 +455,7 @@ export default function App() {
   function prepareTestGate(item: VocabItem, g: TestGate) {
     setFeedback('idle');
     setSpellInput('');
+    setSpellShowIpa(false);
     setHeard('');
     if (g === 'pos') setChoices(pickPosChoices(item.pos));
     if (g === 'meaning') {
@@ -387,7 +512,7 @@ export default function App() {
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-sky-600">沪教牛津 2024 · 七上</p>
             <h1 className="text-xl font-extrabold text-slate-900 sm:text-2xl">周末刷词 U1–U4</h1>
-            <p className="mt-1 text-sm text-slate-500">先学后测 · 小批过关才算记住</p>
+            <p className="mt-1 text-sm text-slate-500">先学后测 · 音标跟读 · 周末后可每日练</p>
           </div>
           <BookOpen className="h-8 w-8 shrink-0 text-sky-500 sm:h-9 sm:w-9" />
         </div>
@@ -438,7 +563,7 @@ export default function App() {
           <Trophy className="h-8 w-8 text-emerald-600" />
           <div>
             <p className="font-extrabold text-emerald-800">周末目标达成！</p>
-            <p className="text-sm text-emerald-700">U1–U4 均已学习并测过全对。</p>
+            <p className="text-sm text-emerald-700">U1–U4 均已学习并测过全对。之后点「每日练」巩固默写与发音。</p>
           </div>
         </div>
       ) : null}
@@ -537,6 +662,18 @@ export default function App() {
                 检测巩固
                 <span className="mt-0.5 block text-xs font-semibold text-emerald-100">
                   仅已学过的词 · 词性/意思/拼写/朗读计分
+                </span>
+              </button>
+
+
+              <button
+                type="button"
+                onClick={() => startDaily()}
+                className="w-full rounded-2xl bg-indigo-600 py-4 text-sm font-extrabold text-white shadow-md shadow-indigo-200"
+              >
+                <span className="inline-flex items-center gap-2"><PenLine className="h-4 w-4" /> 每日练</span>
+                <span className="mt-0.5 block text-xs font-semibold text-indigo-100">
+                  每天约 {DAILY_SIZE} 词 · 听写默写 + 音标对照 + 跟读
                 </span>
               </button>
 
@@ -656,24 +793,23 @@ export default function App() {
                 <p className="font-[Plus_Jakarta_Sans] text-4xl font-extrabold tracking-tight text-slate-900">
                   {current.word}
                 </p>
-                {current.ipa ? <p className="mt-2 text-base text-slate-400">{current.ipa}</p> : null}
-                <div className="mt-3 flex items-center justify-center gap-2">
+                <IpaLine ipa={current.ipa} size="lg" />
+                <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
                   <PosBadge pos={current.pos} />
                   {current.star ? (
                     <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-800">
                       <Star className="h-3 w-3" /> 理解即可
                     </span>
                   ) : null}
+                  {current.core ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2 py-0.5 text-xs font-bold text-sky-800">
+                      课标词
+                    </span>
+                  ) : null}
                 </div>
                 <p className="mt-3 text-xl font-bold text-slate-800">{current.zh}</p>
               </div>
-              <button
-                type="button"
-                onClick={() => speakEnglish(current.word, 2)}
-                className="flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-100 py-3 font-bold"
-              >
-                <Volume2 className="h-5 w-5" /> 再听两遍
-              </button>
+              <SpeakButton word={current.word} times={2} label="听读两遍（跟音标）" strong />
               <div className="rounded-xl bg-amber-50 p-3 text-left text-sm text-amber-950 ring-1 ring-amber-100">
                 <p className="mb-1 font-bold">记忆钩子</p>
                 <ul className="list-disc space-y-1 pl-4">
@@ -696,16 +832,12 @@ export default function App() {
           {learnStep === 'shadow' ? (
             <div className="space-y-3">
               <div className="rounded-2xl bg-violet-50 px-3 py-4 text-center sm:px-6 sm:py-6">
-                <p className="text-3xl font-extrabold text-slate-900">{current.word}</p>
+                <p className="mb-1 text-xs font-bold uppercase tracking-wide text-violet-600">先看音标再跟读</p>
+                <IpaLine ipa={current.ipa} size="lg" />
+                <p className="mt-3 text-3xl font-extrabold text-slate-900">{current.word}</p>
                 <p className="mt-1 text-slate-600">{current.zh}</p>
               </div>
-              <button
-                type="button"
-                onClick={() => speakEnglish(current.word, 1)}
-                className="flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-100 py-3 font-bold"
-              >
-                <Volume2 className="h-5 w-5" /> 再听示范
-              </button>
+              <SpeakButton word={current.word} times={1} label="再听示范" strong />
               {speechSupported() ? (
                 <>
                   <button
@@ -748,7 +880,7 @@ export default function App() {
               </p>
               <div className="rounded-2xl bg-slate-50 px-3 py-6 text-center sm:px-6 sm:py-10">
                 <p className="text-3xl font-extrabold text-slate-900">{current.word}</p>
-                {current.ipa ? <p className="mt-2 text-sm text-slate-400">{current.ipa}</p> : null}
+                <IpaLine ipa={current.ipa} size="md" />
               </div>
               {!revealZh ? (
                 <button
@@ -820,7 +952,7 @@ export default function App() {
                     <p className="font-[Plus_Jakarta_Sans] text-2xl font-extrabold text-slate-900">
                       {current.word}
                     </p>
-                    {current.ipa ? <p className="mt-1 text-sm text-slate-400">{current.ipa}</p> : null}
+                    <IpaLine ipa={current.ipa} size="md" />
                   </div>
                   {buildMode ? (
                     <div className="space-y-2 rounded-xl bg-slate-50 p-3">
@@ -902,13 +1034,8 @@ export default function App() {
                 </p>
                 <p className="mt-3 text-sm font-semibold text-emerald-800">本词学习完成</p>
               </div>
-              <button
-                type="button"
-                onClick={() => speakEnglish(current.word, 1)}
-                className="flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-100 py-3 font-bold"
-              >
-                <Volume2 className="h-5 w-5" /> 最后听一遍
-              </button>
+              {current.ipa ? <IpaLine ipa={current.ipa} size="md" /> : null}
+              <SpeakButton word={current.word} times={1} label="最后听一遍" />
               <button
                 type="button"
                 onClick={finishWordLearn}
@@ -1010,13 +1137,15 @@ export default function App() {
               }}
               className="space-y-3"
             >
+              <SpeakButton word={testWord.word} times={1} label="听写发音" strong />
               <button
                 type="button"
-                onClick={() => speakEnglish(testWord.word, 1)}
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-50 py-2.5 text-sm font-bold text-violet-800"
+                onClick={() => setSpellShowIpa((v) => !v)}
+                className="w-full rounded-xl bg-indigo-50 py-2 text-sm font-bold text-indigo-800 ring-1 ring-indigo-100"
               >
-                <Volume2 className="h-4 w-4" /> 听写发音
+                {spellShowIpa ? '隐藏音标提示' : '显示音标提示（可选）'}
               </button>
+              {spellShowIpa ? <IpaLine ipa={testWord.ipa} size="md" /> : null}
               <input
                 value={spellInput}
                 onChange={(e) => setSpellInput(e.target.value)}
@@ -1037,13 +1166,8 @@ export default function App() {
 
           {testGate === 'speak' ? (
             <div className="space-y-3">
-              <button
-                type="button"
-                onClick={() => speakEnglish(testWord.word, 1)}
-                className="flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-100 py-3 font-bold"
-              >
-                <Volume2 className="h-5 w-5" /> 听示范
-              </button>
+              {testWord.ipa ? <IpaLine ipa={testWord.ipa} size="md" /> : null}
+              <SpeakButton word={testWord.word} times={1} label="听示范" strong />
               {speechSupported() ? (
                 <>
                   <button
@@ -1098,6 +1222,7 @@ export default function App() {
                 {wrongItems.map((w) => (
                   <li key={w.id} className="rounded-xl bg-amber-50 px-3 py-2 text-sm">
                     <span className="font-bold">{w.word}</span>
+                    {w.ipa ? <span className="mx-1 text-xs font-medium text-indigo-600">{w.ipa}</span> : null}
                     <span className="mx-1 text-slate-400">{w.pos}</span>
                     <span className="text-slate-600">{w.zh}</span>
                   </li>
@@ -1146,6 +1271,7 @@ export default function App() {
                       <li key={w.id} className="flex flex-wrap items-baseline gap-x-2 rounded-lg px-2 py-1 text-sm odd:bg-slate-50">
                         {w.star ? <Star className="h-3 w-3 text-amber-500" /> : null}
                         <span className="font-semibold">{w.word}</span>
+                        {w.ipa ? <span className="text-xs font-medium text-indigo-600">{w.ipa}</span> : null}
                         <span className="text-xs text-sky-700">{w.pos}</span>
                         <span className="text-slate-600">{w.zh}</span>
                         {isLearned(p) ? <span className="text-[10px] font-bold text-sky-600">已学</span> : null}
@@ -1160,8 +1286,115 @@ export default function App() {
         </div>
       ) : null}
 
+      {/* DAILY */}
+      {view === 'daily' && dailyQueue[dailyIndex] ? (
+        <div className="mx-auto max-w-3xl rounded-2xl bg-white p-4 shadow-sm ring-1 ring-indigo-100 sm:p-6">
+          <div className="mb-3 flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => {
+                stopSpeak();
+                setView('home');
+              }}
+              className="inline-flex items-center gap-1 text-sm font-semibold text-slate-600"
+            >
+              <X className="h-4 w-4" /> 结束每日练
+            </button>
+            <span className="text-sm font-bold text-slate-500">
+              每日练 {dailyIndex + 1}/{dailyQueue.length}
+            </span>
+          </div>
+          {(() => {
+            const dw = dailyQueue[dailyIndex];
+            return (
+              <div className="space-y-3">
+                {dailyStep === 'dictation' || dailyStep === 'check' ? (
+                  <>
+                    <p className="text-center text-xs font-bold uppercase tracking-wide text-indigo-600">
+                      听写 / 看中文写英文
+                    </p>
+                    <div className="rounded-2xl bg-indigo-50 px-3 py-6 text-center">
+                      <PosBadge pos={dw.pos} />
+                      <p className="mt-2 text-2xl font-extrabold text-slate-900">{dw.zh}</p>
+                      {dailyShowIpa ? <IpaLine ipa={dw.ipa} size="md" /> : null}
+                    </div>
+                    <SpeakButton word={dw.word} times={1} label="听发音再默写" strong />
+                    <button
+                      type="button"
+                      onClick={() => setDailyShowIpa((v) => !v)}
+                      className="w-full rounded-xl bg-white py-2 text-sm font-bold text-indigo-800 ring-1 ring-indigo-100"
+                    >
+                      {dailyShowIpa ? '隐藏音标' : '看音标提示'}
+                    </button>
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        if (dailyFeedback !== 'idle') return;
+                        advanceDaily(spellMatches(dailyInput, dw.word));
+                      }}
+                      className="space-y-2"
+                    >
+                      <input
+                        value={dailyInput}
+                        onChange={(e) => setDailyInput(e.target.value)}
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        placeholder="默写英文"
+                        className="w-full rounded-2xl border-2 border-indigo-200 px-4 py-3.5 text-lg font-semibold outline-none focus:border-indigo-500"
+                      />
+                      <button type="submit" className="w-full rounded-2xl bg-indigo-600 py-3.5 font-extrabold text-white">
+                        检查拼写
+                      </button>
+                    </form>
+                    {dailyFeedback === 'ok' ? (
+                      <p className="text-center text-sm font-bold text-emerald-600">拼对了！</p>
+                    ) : null}
+                    {dailyFeedback === 'bad' ? (
+                      <p className="text-center text-sm font-bold text-rose-600">
+                        答案：{dw.word} {dw.ipa}
+                      </p>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <p className="text-center text-xs font-bold uppercase tracking-wide text-violet-600">
+                      音标对照 · 跟读
+                    </p>
+                    <div className="rounded-2xl bg-violet-50 px-3 py-6 text-center">
+                      <IpaLine ipa={dw.ipa} size="lg" />
+                      <p className="mt-3 text-3xl font-extrabold text-slate-900">{dw.word}</p>
+                      <p className="mt-1 text-slate-600">{dw.zh}</p>
+                    </div>
+                    <SpeakButton word={dw.word} times={2} label="听两遍再跟读" strong />
+                    {speechSupported() ? (
+                      <button
+                        type="button"
+                        onClick={startListen}
+                        disabled={listening}
+                        className="flex w-full items-center justify-center gap-2 rounded-2xl bg-rose-500 py-3.5 font-extrabold text-white disabled:opacity-60"
+                      >
+                        <Mic className="h-5 w-5" /> {listening ? '正在听…' : '点击跟读'}
+                      </button>
+                    ) : null}
+                    {heard ? <p className="text-center text-sm text-slate-600">识别：{heard}</p> : null}
+                    <button
+                      type="button"
+                      onClick={nextDailyWord}
+                      className="w-full rounded-2xl bg-sky-600 py-3.5 font-extrabold text-white"
+                    >
+                      {dailyIndex + 1 < dailyQueue.length ? '下一词' : '完成本日练习'}
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      ) : null}
+
       <footer className="mt-6 text-center text-[11px] text-slate-400">
-        进度 hj7a_weekend_v2 · 共 {VOCAB.length} 条 · 先学后测
+        进度 hj7a_weekend_v3 · 共 {VOCAB.length} 条 · 先学后测 · 每日练
       </footer>
     </div>
   );

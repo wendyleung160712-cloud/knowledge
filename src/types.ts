@@ -4,6 +4,10 @@ export type Pos =
   | 'adj.'
   | 'adv.'
   | 'prep.'
+  | 'pron.'
+  | 'conj.'
+  | 'interj.'
+  | 'art.'
   | 'num.'
   | 'phr.';
 
@@ -17,6 +21,8 @@ export interface VocabItem {
   page?: number;
   /** 课本标 *：只要求理解 */
   star?: boolean;
+  /** 黑体课标词 */
+  core?: boolean;
 }
 
 /** 学习过程步骤（不计分） */
@@ -40,7 +46,7 @@ export interface WordProgress {
 }
 
 export interface ProgressState {
-  version: 2;
+  version: 3;
   day: DayPlan;
   unitFilter: 0 | 1 | 2 | 3 | 4;
   words: Record<string, WordProgress>;
@@ -68,3 +74,4 @@ export const TEST_LABEL: Record<TestGate, string> = {
 };
 
 export const BATCH_SIZE = 6;
+export const DAILY_SIZE = 10;
