@@ -23,6 +23,8 @@ export interface VocabItem {
   star?: boolean;
   /** 黑体课标词 */
   core?: boolean;
+  /** TTS 专用纯英文（无括号/省略号）；缺省则自动清理 word */
+  speak?: string;
 }
 
 /** 学习过程步骤（不计分） */
@@ -46,7 +48,7 @@ export interface WordProgress {
 }
 
 export interface ProgressState {
-  version: 3;
+  version: 4;
   day: DayPlan;
   unitFilter: 0 | 1 | 2 | 3 | 4;
   words: Record<string, WordProgress>;

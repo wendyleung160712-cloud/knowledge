@@ -2,6 +2,8 @@ import type { DayPlan, ProgressState, TestGate, WordProgress } from '../types';
 import { TEST_GATES } from '../types';
 import { VOCAB } from '../data/vocab';
 
+/** v4: stricter gates (must hear / read / spell correctly). Migrates from v3/v2/v1. */
+const KEY_V4 = 'hj7a_weekend_v4';
 const KEY_V3 = 'hj7a_weekend_v3';
 const KEY_V2 = 'hj7a_weekend_v2';
 const KEY_V1 = 'hj7a_weekend_v1';
@@ -21,7 +23,7 @@ export function defaultProgress(): ProgressState {
   const words: Record<string, WordProgress> = {};
   for (const w of VOCAB) words[w.id] = emptyWord();
   return {
-    version: 3,
+    version: 4,
     day: 1,
     unitFilter: 0,
     words,
@@ -56,11 +58,7 @@ function hydrateFromParsed(parsed: {
       wrongCount: typeof o.wrongCount === 'number' ? o.wrongCount : 0,
       lastWrongAt: typeof o.lastWrongAt === 'number' ? o.lastWrongAt : undefined,
       learnedAt:
-        typeof o.learnedAt === 'number'
-          ? o.learnedAt
-          : learnFlag
-            ? Date.now()
-            : undefined,
+        typeof o.learnedAt === 'number' ? o.learnedAt : learnFlag ? Date.now() : undefined,
     };
   }
   base.wrongIds = Array.isArray(parsed.wrongIds)
@@ -72,25 +70,10 @@ function hydrateFromParsed(parsed: {
 
 export function loadProgress(): ProgressState {
   try {
-    const v3 = localStorage.getItem(KEY_V3);
-    if (v3) {
-      const parsed = JSON.parse(v3) as ProgressState;
-      if (parsed?.version === 3) {
-        const base = hydrateFromParsed(parsed);
-        saveProgress(base);
-        return base;
-      }
-    }
-    const v2 = localStorage.getItem(KEY_V2);
-    if (v2) {
-      const parsed = JSON.parse(v2) as ProgressState;
-      const migrated = hydrateFromParsed(parsed);
-      saveProgress(migrated);
-      return migrated;
-    }
-    const v1 = localStorage.getItem(KEY_V1);
-    if (v1) {
-      const parsed = JSON.parse(v1);
+    for (const key of [KEY_V4, KEY_V3, KEY_V2, KEY_V1]) {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
       const migrated = hydrateFromParsed(parsed);
       saveProgress(migrated);
       return migrated;
@@ -102,8 +85,8 @@ export function loadProgress(): ProgressState {
 }
 
 export function saveProgress(state: ProgressState): void {
-  const next = { ...state, version: 3 as const, updatedAt: Date.now() };
-  localStorage.setItem(KEY_V3, JSON.stringify(next));
+  const next = { ...state, version: 4 as const, updatedAt: Date.now() };
+  localStorage.setItem(KEY_V4, JSON.stringify(next));
 }
 
 export function isLearned(p: WordProgress | undefined): boolean {

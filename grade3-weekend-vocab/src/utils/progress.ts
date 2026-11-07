@@ -2,7 +2,9 @@ import type { DayPlan, ProgressState, TestGate, WordProgress } from '../types';
 import { TEST_GATES } from '../types';
 import { VOCAB } from '../data/vocab';
 
-const KEY = 'gz3a_weekend_v1';
+/** v2: stricter learn/test gates (must hear / read / spell correctly). Migrates from v1. */
+const KEY_V2 = 'gz3a_weekend_v2';
+const KEY_V1 = 'gz3a_weekend_v1';
 
 function emptyWord(): WordProgress {
   return {
@@ -19,7 +21,7 @@ export function defaultProgress(): ProgressState {
   const words: Record<string, WordProgress> = {};
   for (const w of VOCAB) words[w.id] = emptyWord();
   return {
-    version: 1,
+    version: 2,
     day: 1,
     unitFilter: 0,
     words,
@@ -28,30 +30,59 @@ export function defaultProgress(): ProgressState {
   };
 }
 
+function hydrateFromParsed(parsed: {
+  day?: number;
+  unitFilter?: number;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  words?: Record<string, any>;
+  wrongIds?: string[];
+  updatedAt?: number;
+}): ProgressState {
+  const base = defaultProgress();
+  base.day = parsed.day === 2 ? 2 : 1;
+  if ([0, 1, 2, 3, 4].includes(parsed.unitFilter as number)) {
+    base.unitFilter = parsed.unitFilter as 0 | 1 | 2 | 3 | 4;
+  }
+  for (const id of Object.keys(base.words)) {
+    const o = parsed.words?.[id];
+    if (!o) continue;
+    const learnFlag = !!(o.learn || o.learned);
+    base.words[id] = {
+      learned: learnFlag,
+      pos: !!o.pos,
+      meaning: !!o.meaning,
+      spell: !!o.spell,
+      speak: !!o.speak,
+      wrongCount: typeof o.wrongCount === 'number' ? o.wrongCount : 0,
+      lastWrongAt: typeof o.lastWrongAt === 'number' ? o.lastWrongAt : undefined,
+      learnedAt:
+        typeof o.learnedAt === 'number' ? o.learnedAt : learnFlag ? Date.now() : undefined,
+    };
+  }
+  base.wrongIds = Array.isArray(parsed.wrongIds)
+    ? parsed.wrongIds.filter((id) => id in base.words)
+    : [];
+  base.updatedAt = parsed.updatedAt || Date.now();
+  return base;
+}
+
 export function loadProgress(): ProgressState {
   try {
-    const raw = localStorage.getItem(KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as ProgressState;
-      if (parsed?.version === 1) {
-        const base = defaultProgress();
-        for (const id of Object.keys(base.words)) {
-          if (parsed.words?.[id]) {
-            base.words[id] = { ...emptyWord(), ...parsed.words[id] };
-          }
-        }
-        base.day = parsed.day === 2 ? 2 : 1;
-        base.unitFilter = ([0, 1, 2, 3, 4] as const).includes(
-          parsed.unitFilter as 0 | 1 | 2 | 3 | 4,
-        )
-          ? (parsed.unitFilter as 0 | 1 | 2 | 3 | 4)
-          : 0;
-        base.wrongIds = Array.isArray(parsed.wrongIds)
-          ? parsed.wrongIds.filter((id) => id in base.words)
-          : [];
-        base.updatedAt = parsed.updatedAt || Date.now();
+    const v2 = localStorage.getItem(KEY_V2);
+    if (v2) {
+      const parsed = JSON.parse(v2) as ProgressState;
+      if (parsed?.version === 2) {
+        const base = hydrateFromParsed(parsed);
+        saveProgress(base);
         return base;
       }
+    }
+    const v1 = localStorage.getItem(KEY_V1);
+    if (v1) {
+      const parsed = JSON.parse(v1);
+      const migrated = hydrateFromParsed(parsed);
+      saveProgress(migrated);
+      return migrated;
     }
   } catch {
     /* ignore */
@@ -60,8 +91,8 @@ export function loadProgress(): ProgressState {
 }
 
 export function saveProgress(state: ProgressState): void {
-  const next = { ...state, version: 1 as const, updatedAt: Date.now() };
-  localStorage.setItem(KEY, JSON.stringify(next));
+  const next = { ...state, version: 2 as const, updatedAt: Date.now() };
+  localStorage.setItem(KEY_V2, JSON.stringify(next));
 }
 
 export function isLearned(p: WordProgress | undefined): boolean {
