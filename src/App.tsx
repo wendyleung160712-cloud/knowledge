@@ -13,6 +13,7 @@ import {
   Volume2,
   X,
 } from 'lucide-react';
+import DictationBox from './components/DictationBox';
 import { UNIT_META, VOCAB, wordsForDay } from './data/vocab';
 import type {
   DayPlan,
@@ -51,6 +52,7 @@ import {
   spellMatchesItem,
   stopSpeak,
 } from './utils/speech';
+import { ocrWarmup } from './utils/handwritingOcr';
 
 type View = 'home' | 'learn' | 'batchDone' | 'test' | 'wrong' | 'list' | 'daily';
 
@@ -178,6 +180,8 @@ export default function App() {
   const [shadowPassed, setShadowPassed] = useState(false);
   const [coverSpellInput, setCoverSpellInput] = useState('');
   const [coverSpellOk, setCoverSpellOk] = useState(false);
+  const [dictationAttempt, setDictationAttempt] = useState(0);
+  const [coverFeedback, setCoverFeedback] = useState<'idle' | 'ok' | 'bad'>('idle');
   const [speakPassed, setSpeakPassed] = useState(false);
   const [dailyShadowPassed, setDailyShadowPassed] = useState(false);
 
@@ -191,6 +195,7 @@ export default function App() {
 
   useEffect(() => {
     initSpeechVoices();
+    ocrWarmup();
   }, []);
 
   const day = progress.day;
@@ -269,6 +274,7 @@ export default function App() {
     setShadowPassed(false);
     setCoverSpellInput('');
     setCoverSpellOk(false);
+    setCoverFeedback('idle');
     setView('learn');
   }
 
@@ -333,6 +339,7 @@ export default function App() {
     setDailyStep('dictation');
     setDailyInput('');
     setDailyFeedback('idle');
+    setDictationAttempt(0);
     setHeard('');
     setDailyShadowPassed(false);
     setView('daily');
@@ -350,6 +357,7 @@ export default function App() {
       window.setTimeout(() => {
         setDailyFeedback('idle');
         setDailyInput('');
+        setDictationAttempt((n) => n + 1);
       }, 900);
       return;
     }
@@ -368,7 +376,8 @@ export default function App() {
       setDailyStep('dictation');
       setDailyInput('');
       setDailyFeedback('idle');
-        setHeard('');
+      setDictationAttempt((n) => n + 1);
+      setHeard('');
       setDailyShadowPassed(false);
     } else {
       setView('home');
@@ -381,6 +390,7 @@ export default function App() {
     const joined = picked.join(current.word.includes(' ') ? ' ' : '');
     if (spellMatchesItem(joined, current)) {
       setCoverSpellOk(true);
+      setCoverFeedback('ok');
       setCoverSpellInput(current.word);
     }
   }, [picked, learnStep, current?.id]);
@@ -407,6 +417,8 @@ export default function App() {
     setHeard('');
     setCoverSpellInput('');
     setCoverSpellOk(false);
+    setCoverFeedback('idle');
+    if (step === 'coverEn') setDictationAttempt((n) => n + 1);
     if (step === 'meet' && current) {
       meetPlayed.current = false;
       setMeetListened(false);
@@ -435,6 +447,8 @@ export default function App() {
       setShadowPassed(false);
       setCoverSpellInput('');
       setCoverSpellOk(false);
+      setCoverFeedback('idle');
+      setDictationAttempt((n) => n + 1);
     } else {
       // 整批学完 → 解锁测试
       const finished = batch.map((w) => {
@@ -540,7 +554,10 @@ export default function App() {
       // 错了留在本关重试
       window.setTimeout(() => {
         setFeedback('idle');
-        if (testGate === 'spell') setSpellInput('');
+        if (testGate === 'spell') {
+          setSpellInput('');
+          setDictationAttempt((n) => n + 1);
+        }
         if (testGate === 'speak') {
           setHeard('');
           setSpeakPassed(false);
@@ -585,7 +602,7 @@ export default function App() {
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-sky-600">沪教牛津 2024 · 七上</p>
             <h1 className="text-xl font-extrabold text-slate-900 sm:text-2xl">周末刷词 U1–U4</h1>
-            <p className="mt-1 text-sm text-slate-500">先学后测 · 音标跟读 · 周末后可每日练</p>
+            <p className="mt-1 text-sm text-slate-500">先学后测 · 听写手写判对错 · 音标跟读 · 每日练</p>
           </div>
           <BookOpen className="h-8 w-8 shrink-0 text-sky-500 sm:h-9 sm:w-9" />
         </div>
@@ -746,7 +763,7 @@ export default function App() {
               >
                 <span className="inline-flex items-center gap-2"><PenLine className="h-4 w-4" /> 每日练</span>
                 <span className="mt-0.5 block text-xs font-semibold text-indigo-100">
-                  每天约 {DAILY_SIZE} 词 · 听写默写 + 音标对照 + 跟读
+                  每天约 {DAILY_SIZE} 词 · 听写手写/键盘 + 音标跟读
                 </span>
               </button>
 
@@ -1012,49 +1029,33 @@ export default function App() {
           {learnStep === 'coverEn' ? (
             <div className="space-y-3">
               <p className="text-center text-sm font-semibold text-slate-500">
-                遮盖回忆 · 中→英：必须拼对才能下一步
+                中→英听写：手写或键盘拼对才能下一步（不显示英文/音标）
               </p>
-              <div className="rounded-2xl bg-slate-50 px-3 py-6 text-center sm:px-6 sm:py-8">
-                <div className="mb-2 flex justify-center">
-                  <PosBadge pos={current.pos} />
-                </div>
-                <p className="text-2xl font-extrabold text-slate-900">{current.zh}</p>
-                <IpaLine ipa={current.ipa} size="md" />
-              </div>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const ok = spellMatchesItem(coverSpellInput, current);
-                  setCoverSpellOk(ok);
-                  if (!ok) {
+              <DictationBox
+                item={current}
+                accent="sky"
+                showZhDefault
+                checkLabel="检查拼写"
+                resetKey={`${current.id}-${dictationAttempt}`}
+                feedback={coverFeedback}
+                revealWord={coverFeedback === 'bad' ? current.word : undefined}
+                onCheck={(ok, text) => {
+                  setCoverSpellInput(text);
+                  if (ok) {
+                    setCoverSpellOk(true);
+                    setCoverFeedback('ok');
+                    setRevealEn(false);
+                  } else {
+                    setCoverSpellOk(false);
+                    setCoverFeedback('bad');
                     setRevealEn(true);
+                    window.setTimeout(() => {
+                      setCoverFeedback('idle');
+                      setDictationAttempt((n) => n + 1);
+                    }, 1100);
                   }
                 }}
-                className="space-y-2"
-              >
-                <input
-                  value={coverSpellInput}
-                  onChange={(e) => {
-                    setCoverSpellInput(e.target.value);
-                    setCoverSpellOk(spellMatchesItem(e.target.value, current));
-                  }}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  placeholder="在此拼写英文"
-                  className="w-full rounded-2xl border-2 border-sky-200 px-4 py-3.5 text-lg font-semibold outline-none focus:border-sky-500"
-                />
-                <button type="submit" className="w-full rounded-2xl bg-violet-600 py-3 font-extrabold text-white">
-                  检查拼写
-                </button>
-              </form>
-              {coverSpellOk ? (
-                <p className="text-center text-sm font-bold text-emerald-600">拼对了！</p>
-              ) : coverSpellInput && revealEn ? (
-                <p className="text-center text-sm font-bold text-rose-600">
-                  再试试。答案：{current.word}
-                </p>
-              ) : null}
+              />
               <button
                 type="button"
                 onClick={openBuildPractice}
@@ -1178,10 +1179,12 @@ export default function App() {
           <p className="mb-2 text-center text-xs font-semibold text-emerald-700">计分检测 · 已学过的词</p>
 
           <div className="mb-4 text-center">
-            {testGate === 'spell' || (testGate === 'meaning' && meaningMode === 'zh2en') ? (
+            {testGate === 'spell' ? (
+              <p className="text-sm font-bold text-emerald-700">拼写听写关</p>
+            ) : testGate === 'meaning' && meaningMode === 'zh2en' ? (
               <>
                 <p className="text-2xl font-extrabold text-slate-800">{testWord.zh}</p>
-                {testGate === 'spell' ? null : <IpaLine ipa={testWord.ipa} size="sm" />}
+                <IpaLine ipa={testWord.ipa} size="sm" />
               </>
             ) : (
               <>
@@ -1231,34 +1234,20 @@ export default function App() {
           ) : null}
 
           {testGate === 'spell' ? (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
+            <DictationBox
+              item={testWord}
+              accent="emerald"
+              showZhDefault
+              checkLabel="检查（拼对才能下一关）"
+              resetKey={`${testWord.id}-spell-${dictationAttempt}`}
+              feedback={feedback}
+              revealWord={feedback === 'bad' ? testWord.word : undefined}
+              disabled={feedback === 'ok'}
+              onCheck={(ok) => {
                 if (feedback !== 'idle') return;
-                advanceTest(spellMatchesItem(spellInput, testWord));
+                advanceTest(ok);
               }}
-              className="space-y-3"
-            >
-              <SpeakButton item={testWord} times={1} label="听写发音" strong />
-              <IpaLine ipa={testWord.ipa} size="md" />
-              <input
-                value={spellInput}
-                onChange={(e) => setSpellInput(e.target.value)}
-                autoCapitalize="off"
-                autoCorrect="off"
-                spellCheck={false}
-                placeholder="默写英文"
-                className="w-full rounded-2xl border-2 border-emerald-200 px-4 py-3.5 text-lg font-semibold outline-none focus:border-emerald-500"
-              />
-              <button type="submit" className="w-full rounded-2xl bg-emerald-600 py-3.5 font-extrabold text-white">
-                检查（拼对才能下一关）
-              </button>
-              {feedback === 'bad' ? (
-                <p className="text-center text-sm font-bold text-rose-600">
-                  拼错了，已入错词本。答案：{testWord.word} · 请再拼一次
-                </p>
-              ) : null}
-            </form>
+            />
           ) : null}
 
           {testGate === 'speak' ? (
@@ -1423,45 +1412,20 @@ export default function App() {
               <div className="space-y-3">
                 {dailyStep === 'dictation' || dailyStep === 'check' ? (
                   <>
-                    <p className="text-center text-xs font-bold uppercase tracking-wide text-indigo-600">
-                      听写 / 看中文写英文
-                    </p>
-                    <div className="rounded-2xl bg-indigo-50 px-3 py-6 text-center">
-                      <PosBadge pos={dw.pos} />
-                      <p className="mt-2 text-2xl font-extrabold text-slate-900">{dw.zh}</p>
-                      <IpaLine ipa={dw.ipa} size="sm" />
-                    </div>
-                    <SpeakButton item={dw} times={1} label="听发音再默写" strong />
-                    <IpaLine ipa={dw.ipa} size="md" />
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
+                    <DictationBox
+                      item={dw}
+                      accent="indigo"
+                      showZhDefault
+                      checkLabel="检查拼写（拼对才能跟读）"
+                      resetKey={`${dw.id}-daily-${dictationAttempt}`}
+                      feedback={dailyFeedback}
+                      revealWord={dailyFeedback === 'bad' ? `${dw.word} ${dw.ipa || ''}`.trim() : undefined}
+                      disabled={dailyFeedback === 'ok'}
+                      onCheck={(ok) => {
                         if (dailyFeedback !== 'idle') return;
-                        advanceDaily(spellMatchesItem(dailyInput, dw));
+                        advanceDaily(ok);
                       }}
-                      className="space-y-2"
-                    >
-                      <input
-                        value={dailyInput}
-                        onChange={(e) => setDailyInput(e.target.value)}
-                        autoCapitalize="off"
-                        autoCorrect="off"
-                        spellCheck={false}
-                        placeholder="默写英文"
-                        className="w-full rounded-2xl border-2 border-indigo-200 px-4 py-3.5 text-lg font-semibold outline-none focus:border-indigo-500"
-                      />
-                      <button type="submit" className="w-full rounded-2xl bg-indigo-600 py-3.5 font-extrabold text-white">
-                        检查拼写（拼对才能跟读）
-                      </button>
-                    </form>
-                    {dailyFeedback === 'ok' ? (
-                      <p className="text-center text-sm font-bold text-emerald-600">拼对了！</p>
-                    ) : null}
-                    {dailyFeedback === 'bad' ? (
-                      <p className="text-center text-sm font-bold text-rose-600">
-                        拼错了，已入错词本。答案：{dw.word} {dw.ipa} · 请再默写
-                      </p>
-                    ) : null}
+                    />
                   </>
                 ) : (
                   <>
@@ -1525,7 +1489,7 @@ export default function App() {
       ) : null}
 
       <footer className="mt-6 text-center text-[11px] text-slate-400">
-        进度 hj7a_weekend_v4 · 共 {VOCAB.length} 条 · 读对/拼对才能下一步
+        进度 hj7a_weekend_v5 · 共 {VOCAB.length} 条 · 听写手写判对错 · 读对/拼对才能下一步
       </footer>
     </div>
   );
