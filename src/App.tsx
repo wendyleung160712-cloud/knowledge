@@ -47,6 +47,7 @@ import {
   heardFromEvent,
   initSpeechVoices,
   speakItem,
+  looksLikeChineseTranscript,
   speechMatchesItem,
   speechSupported,
   spellMatchesItem,
@@ -186,6 +187,8 @@ export default function App() {
   const [dailyShadowPassed, setDailyShadowPassed] = useState(false);
 
   const recRef = useRef<ReturnType<typeof createRecognizer>>(null);
+  const listenTimerRef = useRef<number | null>(null);
+  const listenGenRef = useRef(0);
   const meetPlayed = useRef(false);
   const listenTarget = useRef<'shadow' | 'test' | 'daily' | null>(null);
 
@@ -195,7 +198,8 @@ export default function App() {
 
   useEffect(() => {
     initSpeechVoices();
-    ocrWarmup();
+    const t = window.setTimeout(() => ocrWarmup(), 5000);
+    return () => window.clearTimeout(t);
   }, []);
 
   const day = progress.day;
@@ -494,37 +498,127 @@ export default function App() {
     });
   }
 
+function stopListen() {
+    listenGenRef.current += 1;
+    if (listenTimerRef.current != null) {
+      window.clearTimeout(listenTimerRef.current);
+      listenTimerRef.current = null;
+    }
+    try {
+      recRef.current?.abort();
+    } catch {
+      /* ignore */
+    }
+    recRef.current = null;
+    setListening(false);
+  }
+
   function startListen(target: 'shadow' | 'test' | 'daily' = 'shadow') {
-    const rec = createRecognizer();
-    if (!rec) {
+    if (!speechSupported()) {
       setHeard('本机无语音识别');
       return;
     }
+    if (listening) {
+      stopListen();
+      return;
+    }
+    stopSpeak();
+    try {
+      recRef.current?.abort();
+    } catch {
+      /* ignore */
+    }
+    if (listenTimerRef.current != null) {
+      window.clearTimeout(listenTimerRef.current);
+      listenTimerRef.current = null;
+    }
+    const gen = ++listenGenRef.current;
     listenTarget.current = target;
-    recRef.current = rec;
     setListening(true);
     setHeard('');
-    rec.onresult = (ev) => {
-      const texts = heardFromEvent(ev);
-      if (!texts.length) return;
-      const text = texts[0];
-      setHeard(text);
-      const item =
-        target === 'test' ? testQueue[ti] : target === 'daily' ? dailyQueue[dailyIndex] : batch[bi];
-      if (!item) return;
-      if (speechMatchesItem(text, item)) {
-        if (target === 'shadow') setShadowPassed(true);
-        if (target === 'test') setSpeakPassed(true);
-        if (target === 'daily') setDailyShadowPassed(true);
+
+    const begin = () => {
+      if (listenGenRef.current !== gen) return;
+      const rec = createRecognizer();
+      if (!rec) {
+        setHeard('本机无语音识别');
+        setListening(false);
+        return;
       }
+      recRef.current = rec;
+      let gotMatch = false;
+
+      rec.onresult = (ev) => {
+        if (listenGenRef.current !== gen) return;
+        const texts = heardFromEvent(ev);
+        if (!texts.length) return;
+        const item =
+          target === 'test' ? testQueue[ti] : target === 'daily' ? dailyQueue[dailyIndex] : batch[bi];
+        if (!item) return;
+        const hit = texts.find((t) => speechMatchesItem(t, item));
+        if (hit) {
+          gotMatch = true;
+          setHeard(hit);
+          if (target === 'shadow') setShadowPassed(true);
+          if (target === 'test') setSpeakPassed(true);
+          if (target === 'daily') setDailyShadowPassed(true);
+          try {
+            rec.stop();
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        if (looksLikeChineseTranscript(texts[0])) {
+          setHeard('识别成了中文。请到「设置 → 通用 → 键盘 → 听写」打开英语听写后再试');
+        } else {
+          setHeard(texts[0]);
+        }
+      };
+
+      rec.onerror = (ev) => {
+        if (listenGenRef.current !== gen) return;
+        const err = (ev as unknown as { error?: string }).error || '';
+        if (err === 'aborted') return;
+        if (err === 'no-speech') setHeard('没听清，请靠近麦克风再读一次');
+        else if (err === 'not-allowed' || err === 'service-not-allowed') setHeard('请允许使用麦克风后再试');
+        else if (err === 'audio-capture') setHeard('找不到麦克风，请检查权限');
+        else setHeard((prev) => prev || '识别中断，请再试一次');
+        setListening(false);
+      };
+
+      rec.onend = () => {
+        if (listenGenRef.current !== gen) return;
+        if (listenTimerRef.current != null) {
+          window.clearTimeout(listenTimerRef.current);
+          listenTimerRef.current = null;
+        }
+        setListening(false);
+        if (!gotMatch) {
+          setHeard((prev) => prev || '没听清，请再点一次跟读');
+        }
+      };
+
+      try {
+        rec.start();
+      } catch {
+        setListening(false);
+        setHeard('识别启动失败，请再点一次');
+        return;
+      }
+
+      listenTimerRef.current = window.setTimeout(() => {
+        if (listenGenRef.current !== gen) return;
+        try {
+          rec.stop();
+        } catch {
+          setListening(false);
+        }
+      }, 8000);
     };
-    rec.onerror = () => setListening(false);
-    rec.onend = () => setListening(false);
-    try {
-      rec.start();
-    } catch {
-      setListening(false);
-    }
+
+    // Give iOS time to release the audio session after the model audio
+    window.setTimeout(begin, 350);
   }
 
   function prepareTestGate(item: VocabItem, g: TestGate) {
@@ -935,10 +1029,9 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => startListen('shadow')}
-                    disabled={listening}
-                    className="flex w-full items-center justify-center gap-2 rounded-2xl bg-rose-500 py-3.5 font-extrabold text-white disabled:opacity-60"
+                    className="flex w-full items-center justify-center gap-2 rounded-2xl bg-rose-500 py-3.5 font-extrabold text-white"
                   >
-                    <Mic className="h-5 w-5" /> {listening ? '正在听…' : shadowPassed ? '读对了，可再试' : '点击跟读'}
+                    <Mic className="h-5 w-5" /> {listening ? '正在听…点此取消' : shadowPassed ? '读对了，可再试' : '点击跟读'}
                   </button>
                   {heard ? (
                     <p className="text-center text-sm text-slate-600">
@@ -1259,10 +1352,10 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => startListen('test')}
-                    disabled={listening || feedback !== 'idle'}
+                    disabled={!listening && feedback !== 'idle'}
                     className="flex w-full items-center justify-center gap-2 rounded-2xl bg-rose-500 py-3.5 font-extrabold text-white disabled:opacity-60"
                   >
-                    <Mic className="h-5 w-5" /> {listening ? '正在听…' : speakPassed ? '读对了' : '朗读'}
+                    <Mic className="h-5 w-5" /> {listening ? '正在听…点此取消' : speakPassed ? '读对了' : '朗读'}
                   </button>
                   {heard ? (
                     <p className="text-center text-sm">
@@ -1443,10 +1536,9 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => startListen('daily')}
-                          disabled={listening}
-                          className="flex w-full items-center justify-center gap-2 rounded-2xl bg-rose-500 py-3.5 font-extrabold text-white disabled:opacity-60"
+                          className="flex w-full items-center justify-center gap-2 rounded-2xl bg-rose-500 py-3.5 font-extrabold text-white"
                         >
-                          <Mic className="h-5 w-5" /> {listening ? '正在听…' : dailyShadowPassed ? '读对了' : '点击跟读'}
+                          <Mic className="h-5 w-5" /> {listening ? '正在听…点此取消' : dailyShadowPassed ? '读对了' : '点击跟读'}
                         </button>
                         {heard ? (
                           <p className="text-center text-sm text-slate-600">

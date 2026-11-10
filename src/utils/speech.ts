@@ -58,11 +58,31 @@ export function speakTextFor(item: Pick<VocabItem, 'word' | 'speak'>): string {
   return cleanSpeakText(item.word);
 }
 
+let resumeTimer: number | null = null;
+
+function keepSpeechAlive(on: boolean): void {
+  if (typeof window === 'undefined' || !window.speechSynthesis) return;
+  if (on) {
+    if (resumeTimer != null) return;
+    resumeTimer = window.setInterval(() => {
+      try {
+        if (window.speechSynthesis.speaking) window.speechSynthesis.resume();
+      } catch {
+        /* iOS can throw if the utterance already ended */
+      }
+    }, 250);
+  } else if (resumeTimer != null) {
+    window.clearInterval(resumeTimer);
+    resumeTimer = null;
+  }
+}
+
 export function speakEnglish(text: string, times = 1, gapMs = 480): void {
   if (typeof window === 'undefined' || !window.speechSynthesis) return;
   const clean = text.trim();
   if (!clean) return;
   window.speechSynthesis.cancel();
+  keepSpeechAlive(false);
   const preferred = pickVoice();
   let left = Math.max(1, times);
   const playOnce = () => {
@@ -74,15 +94,14 @@ export function speakEnglish(text: string, times = 1, gapMs = 480): void {
     u.onend = () => {
       left -= 1;
       if (left > 0) window.setTimeout(playOnce, gapMs);
+      else keepSpeechAlive(false);
     };
+    u.onerror = () => keepSpeechAlive(false);
+    keepSpeechAlive(true);
     window.speechSynthesis.speak(u);
   };
-  // Some browsers need a tick after voiceschanged
-  if (!window.speechSynthesis.getVoices().length) {
-    window.setTimeout(playOnce, 60);
-  } else {
-    playOnce();
-  }
+  // iOS often drops or stutters the first utterance if it starts immediately after cancel
+  window.setTimeout(playOnce, 80);
 }
 
 export function speakItem(item: Pick<VocabItem, 'word' | 'speak'>, times = 1): void {
@@ -93,6 +112,7 @@ export function stopSpeak(): void {
   if (typeof window !== 'undefined' && window.speechSynthesis) {
     window.speechSynthesis.cancel();
   }
+  keepSpeechAlive(false);
 }
 
 export function normalizeSpell(s: string): string {
@@ -196,27 +216,221 @@ export function heardFromEvent(event: Event): string[] {
     }
   ).results;
   const out: string[] = [];
+  const seen = new Set<string>();
   for (let i = 0; i < results.length; i += 1) {
     const r = results[i];
     for (let j = 0; j < r.length; j += 1) {
       const t = r[j]?.transcript?.trim();
-      if (t) out.push(t);
+      if (t && !seen.has(t.toLowerCase())) {
+        seen.add(t.toLowerCase());
+        out.push(t);
+      }
     }
   }
   return out;
 }
 
+const WORD_TO_NUM: Record<string, string> = {
+  zero: '0',
+  one: '1',
+  two: '2',
+  three: '3',
+  four: '4',
+  five: '5',
+  six: '6',
+  seven: '7',
+  eight: '8',
+  nine: '9',
+  ten: '10',
+};
+
+const NUM_TO_WORD: Record<string, string> = Object.fromEntries(
+  Object.entries(WORD_TO_NUM).map(([w, n]) => [n, w]),
+);
+
+const SPELL_VARIANTS: [string, string][] = [
+  ['colour', 'color'],
+  ['coloured', 'colored'],
+  ['favourite', 'favorite'],
+  ['centre', 'center'],
+  ['metre', 'meter'],
+  ['practise', 'practice'],
+  ['neighbour', 'neighbor'],
+  ['organise', 'organize'],
+  ['organised', 'organized'],
+  ['realise', 'realize'],
+  ['travelling', 'traveling'],
+  ['grey', 'gray'],
+];
+
+const HOMOPHONES: Record<string, string[]> = {
+  to: ['too', 'two'],
+  too: ['to', 'two'],
+  two: ['to', 'too'],
+  for: ['four', 'fore'],
+  four: ['for', 'fore'],
+  one: ['won'],
+  won: ['one'],
+  sun: ['son'],
+  son: ['sun'],
+  see: ['sea', 'c'],
+  sea: ['see', 'c'],
+  know: ['no'],
+  no: ['know'],
+  write: ['right', 'rite'],
+  right: ['write', 'rite'],
+  their: ['there', 'theyre', "they're"],
+  there: ['their', 'theyre', "they're"],
+  here: ['hear'],
+  hear: ['here'],
+  by: ['bye', 'buy'],
+  bye: ['by', 'buy'],
+  buy: ['by', 'bye'],
+  our: ['hour'],
+  hour: ['our'],
+  where: ['wear', 'ware'],
+  wear: ['where', 'ware'],
+  week: ['weak'],
+  weak: ['week'],
+  which: ['witch'],
+  be: ['bee'],
+  bee: ['be'],
+  i: ['eye', 'aye'],
+  eye: ['i', 'aye'],
+  you: ['u'],
+  new: ['knew'],
+  knew: ['new'],
+  read: ['red'],
+  red: ['read'],
+  meet: ['meat'],
+  meat: ['meet'],
+  peace: ['piece'],
+  piece: ['peace'],
+  whole: ['hole'],
+  hole: ['whole'],
+  wait: ['weight'],
+  weight: ['wait'],
+  hi: ['high'],
+  high: ['hi'],
+  ok: ['okay'],
+  okay: ['ok'],
+  plane: ['plain'],
+  plain: ['plane'],
+  sail: ['sale'],
+  sale: ['sail'],
+  male: ['mail'],
+  mail: ['male'],
+  flour: ['flower'],
+  flower: ['flour'],
+  break: ['brake'],
+  brake: ['break'],
+  weather: ['whether'],
+  whether: ['weather'],
+};
+
+function foldSpeech(s: string): string {
+  let x = normalizeSpell(s).toLowerCase();
+  x = x.replace(/[\u3400-\u9fff]/g, ' ');
+  const reps: [RegExp, string][] = [
+    [/\bwhat's\b/g, 'what is'],
+    [/\bi'm\b/g, 'i am'],
+    [/\byou're\b/g, 'you are'],
+    [/\bthey're\b/g, 'they are'],
+    [/\bwe're\b/g, 'we are'],
+    [/\bit's\b/g, 'it is'],
+    [/\bthat's\b/g, 'that is'],
+    [/\blet's\b/g, 'let us'],
+    [/\bdon't\b/g, 'do not'],
+    [/\bdoesn't\b/g, 'does not'],
+    [/\bdidn't\b/g, 'did not'],
+    [/\bcan't\b/g, 'cannot'],
+    [/\bwon't\b/g, 'will not'],
+    [/\bisn't\b/g, 'is not'],
+    [/\baren't\b/g, 'are not'],
+    [/\bwasn't\b/g, 'was not'],
+    [/\bweren't\b/g, 'were not'],
+    [/\bhaven't\b/g, 'have not'],
+    [/\bhasn't\b/g, 'has not'],
+    [/\bhadn't\b/g, 'had not'],
+    [/\bcouldn't\b/g, 'could not'],
+    [/\bwouldn't\b/g, 'would not'],
+    [/\bshouldn't\b/g, 'should not'],
+    [/\bi'd\b/g, 'i would'],
+  ];
+  for (const [re, to] of reps) x = x.replace(re, to);
+  return x.replace(/[^a-z0-9\s']/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function editDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (Math.abs(m - n) > 2) return 99;
+  const prev = new Array<number>(n + 1);
+  const cur = new Array<number>(n + 1);
+  for (let j = 0; j <= n; j += 1) prev[j] = j;
+  for (let i = 1; i <= m; i += 1) {
+    cur[0] = i;
+    for (let j = 1; j <= n; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+    }
+    for (let j = 0; j <= n; j += 1) prev[j] = cur[j];
+  }
+  return prev[n];
+}
+
+function variantsOf(word: string): Set<string> {
+  const out = new Set<string>([word]);
+  if (WORD_TO_NUM[word]) out.add(WORD_TO_NUM[word]);
+  if (NUM_TO_WORD[word]) out.add(NUM_TO_WORD[word]);
+  for (const [a, b] of SPELL_VARIANTS) {
+    if (word === a) out.add(b);
+    if (word === b) out.add(a);
+  }
+  const homo = HOMOPHONES[word];
+  if (homo) {
+    for (const h of homo) out.add(h);
+  }
+  return out;
+}
+
+function tokenClose(heard: string, target: string): boolean {
+  if (heard === target) return true;
+  const ev = variantsOf(target);
+  const eh = variantsOf(heard);
+  for (const v of ev) {
+    if (eh.has(v) || heard === v) return true;
+  }
+  const allow = target.length >= 8 ? 2 : target.length >= 4 ? 1 : 0;
+  if (allow && editDistance(heard, target) <= allow) return true;
+  for (const v of ev) {
+    const a = v.length >= 8 ? 2 : v.length >= 4 ? 1 : 0;
+    if (a && editDistance(heard, v) <= a) return true;
+  }
+  return false;
+}
+
+const FILLERS = new Set(['uh', 'um', 'er', 'ah', 'hmm', 'mm']);
+
 export function speechLooseMatch(heard: string, target: string): boolean {
-  const h = normalizeSpell(heard).replace(/[^a-z0-9\s']/g, '');
-  const t = normalizeSpell(target).replace(/[^a-z0-9\s']/g, '');
+  const h = foldSpeech(heard);
+  const t = foldSpeech(target);
   if (!h || !t) return false;
   if (h === t) return true;
+  const hCompact = h.replace(/\s+/g, '');
+  const tCompact = t.replace(/\s+/g, '');
+  if (hCompact === tCompact) return true;
   if (h.includes(t) || t.includes(h)) return true;
-  const hw = h.split(' ').filter(Boolean);
+
   const tw = t.split(' ').filter(Boolean);
-  if (tw.length === 1)
-    return hw.some((w) => w === tw[0] || (tw[0].length > 3 && w.startsWith(tw[0].slice(0, 3))));
-  const hit = tw.filter((w) => hw.includes(w)).length;
+  const hw = h.split(' ').filter((w) => w && !FILLERS.has(w) && (tw.includes(w) || !['a', 'an', 'the'].includes(w)));
+  if (!hw.length) return false;
+  if (hw.join(' ') === tw.join(' ') || hw.join('') === tCompact) return true;
+
+  if (tw.length === 1) {
+    return hw.some((w) => tokenClose(w, tw[0])) || tokenClose(hCompact, tw[0]);
+  }
+  const hit = tw.filter((w) => hw.some((x) => tokenClose(x, w))).length;
   return hit >= Math.ceil(tw.length * 0.6);
 }
 
@@ -243,4 +457,10 @@ export function acceptSpeakAnswers(item: Pick<VocabItem, 'word' | 'speak'>): str
 export function speechMatchesItem(heard: string, item: Pick<VocabItem, 'word' | 'speak'>): boolean {
   if (!heard.trim()) return false;
   return acceptSpeakAnswers(item).some((t) => speechLooseMatch(heard, t));
+}
+
+export function looksLikeChineseTranscript(s: string): boolean {
+  const cjk = (s.match(/[\u3400-\u9fff]/g) || []).length;
+  const latin = (s.match(/[a-zA-Z]/g) || []).length;
+  return cjk >= 2 && cjk > latin;
 }
